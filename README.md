@@ -1,6 +1,6 @@
 # binary
 
-## build and push binaly to ECR
+## build and push binary to ECR
 ```
 ./deploy.sh XXXXXX.dkr.ecr.ap-northeast-1.amazonaws.com
 ```
