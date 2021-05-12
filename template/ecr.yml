@@ -1,0 +1,12 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECR
+
+Resources:
+  ########################################################
+  ### ECR Repository
+  ########################################################
+  TestEcrPoc:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: go-server
+
