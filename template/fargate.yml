@@ -122,7 +122,7 @@ Resources:
                 Fn::ImportValue: !Sub ${SystemName}-db-user
           Secrets:
             - Name: DBPASSWORD
-              ValueFrom: !Sub ${SystemName}-DBPassword
+              ValueFrom: !Sub ${SystemName}-db-password
 
 # ------------------------------------------------------------#
 #  ECS Service

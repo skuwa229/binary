@@ -7,3 +7,4 @@ RUN wget https://github.com/skuwa229/binary/blob/main/main
 RUN chmod +x main
 CMD ./main
 
+
