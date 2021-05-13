@@ -8,6 +8,45 @@ Parameters:
   SystemName:
     Type: String
     Description: Your System Name.
+  ImageUri:
+    Type: String
+    Description: Application Image URI
+  # Scaling params
+  ServiceScaleEvaluationPeriods:
+    Description: The number of periods over which data is compared to the specified threshold
+    Type: Number
+    Default: 2
+    MinValue: 2
+
+  ServiceCpuScaleOutThreshold:
+    Type: Number
+    Description: Average CPU value to trigger auto scaling out
+    Default: 50
+    MinValue: 0
+    MaxValue: 100
+    ConstraintDescription: Value must be between 0 and 100
+
+  ServiceCpuScaleInThreshold:
+    Type: Number
+    Description: Average CPU value to trigger auto scaling in
+    Default: 25
+    MinValue: 0
+    MaxValue: 100
+    ConstraintDescription: Value must be between 0 and 100
+
+  TaskMinContainerCount:
+    Type: Number
+    Description: Minimum number of containers to run for the service
+    Default: 1
+    MinValue: 1
+    ConstraintDescription: Value must be at least one
+
+  TaskMaxContainerCount:
+    Type: Number
+    Description: Maximum number of containers to run for the service when auto scaling out
+    Default: 2
+    MinValue: 1
+    ConstraintDescription: Value must be at least one
 
 Resources:
 # ------------------------------------------------------------#
@@ -25,6 +64,265 @@ Resources:
     Properties:
       LogGroupName: !Sub /${SystemName}-loggroup
 
+# ------------------------------------------------------------#
+#  ALB
+# ------------------------------------------------------------#
+  appALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${SystemName}-app-alb
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      Subnets:
+        - Fn::ImportValue:
+            !Sub ${SystemName}-PublicSubnet1a
+        - Fn::ImportValue:
+            !Sub ${SystemName}-PublicSubnet1c
+      SecurityGroups:
+        - Fn::ImportValue:
+            !Sub ${SystemName}-app-alb-sg
+
+  appAlbTg:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${SystemName}-app-alb-tg
+      Protocol: HTTP
+      Port: 80
+      TargetType: ip
+      VpcId:
+        Fn::ImportValue:
+          !Sub ${SystemName}-VPC
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthCheckPort: traffic-port
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+      Matcher:
+        HttpCode: 200
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+
+  appListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref appALB
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref appAlbTg
+
+# ------------------------------------------------------------#
+#  ECS Task
+# ------------------------------------------------------------#
+  appTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+
+  appTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${SystemName}-app-task
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      TaskRoleArn: !Ref appTaskExecutionRole
+      ExecutionRoleArn: !Ref appTaskExecutionRole
+      Cpu: 256
+      Memory: 512
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUri
+          PortMappings:
+            - Protocol: tcp
+              HostPort: 80
+              ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref logGroup
+              awslogs-region: !Sub "${AWS::Region}"
+              awslogs-stream-prefix: appTask
+          Environment:
+            - Name: DBHOST
+              Value:
+                Fn::ImportValue: !Sub ${SystemName}-db-endpoint
+            - Name: DB
+              Value:
+                Fn::ImportValue: !Sub ${SystemName}-db
+            - Name: DBUSER
+              Value:
+                Fn::ImportValue: !Sub ${SystemName}-db-user
+          Secrets:
+            - Name: DBPASSWORD
+              ValueFrom: !Sub ${SystemName}-db-password
+
+# ------------------------------------------------------------#
+#  ECS Service
+# ------------------------------------------------------------#
+  appService:
+    Type: AWS::ECS::Service
+    DependsOn: appALB
+    Properties:
+      ServiceName: !Sub ${SystemName}-app-service
+      LaunchType: FARGATE
+      Cluster: !Ref ecsCluster
+      TaskDefinition: !Ref appTask
+      DesiredCount: 2
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+      LoadBalancers:
+        - TargetGroupArn: !Ref appAlbTg
+          ContainerName: app
+          ContainerPort: 80
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue:
+                !Sub ${SystemName}-app-fargate-sg
+          Subnets:
+            - Fn::ImportValue:
+                !Sub ${SystemName}-PrivateSubnet1a
+            - Fn::ImportValue:
+                !Sub ${SystemName}-PrivateSubnet1c
+
+# ------------------------------------------------------------#
+#  Auto Scaling Service
+# ------------------------------------------------------------#
+  ServiceAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${SystemName}-autoscaling"
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - application-autoscaling:*
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                Resource: '*'
+
+  ServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref TaskMinContainerCount
+      MaxCapacity: !Ref TaskMaxContainerCount
+      ResourceId: !Sub
+        - service/${EcsClusterName}/${EcsDefaultServiceName}
+        - EcsClusterName: !Ref ecsCluster
+          EcsDefaultServiceName: !Sub "${SystemName}-app-service"
+      RoleARN: !GetAtt ServiceAutoScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn:
+      - appService
+      - ServiceAutoScalingRole
+
+  ServiceScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${SystemName}-ScaleOutPolicy"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - ScalingAdjustment: 1
+            MetricIntervalLowerBound: 0
+    DependsOn: ServiceScalingTarget
+
+  ServiceScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${SystemName}-ScaleInPolicy"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - ScalingAdjustment: -1
+            MetricIntervalUpperBound: 0
+    DependsOn: ServiceScalingTarget
+
+  ServiceScaleOutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${SystemName}-ScaleOutAlarm"
+      EvaluationPeriods: !Ref ServiceScaleEvaluationPeriods
+      Statistic: Average
+      TreatMissingData: notBreaching
+      Threshold: !Ref ServiceCpuScaleOutThreshold
+      AlarmDescription: Alarm to add capacity if CPU is high
+      Period: 60
+      AlarmActions:
+        - !Ref ServiceScaleOutPolicy
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ecsCluster
+        - Name: ServiceName
+          Value: !Sub "${SystemName}-app-service"
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+    DependsOn:
+      - appService
+      - ServiceScaleOutPolicy
+
+  ServiceScaleInAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${SystemName}-ScaleInAlarm"
+      EvaluationPeriods: !Ref ServiceScaleEvaluationPeriods
+      Statistic: Average
+      TreatMissingData: notBreaching
+      Threshold: !Ref ServiceCpuScaleInThreshold
+      AlarmDescription: Alarm to reduce capacity if container CPU is low
+      Period: 300
+      AlarmActions:
+        - !Ref ServiceScaleInPolicy
+      Namespace: AWS/ECS
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ecsCluster
+        - Name: ServiceName
+          Value: !Sub "${SystemName}-app-service"
+      ComparisonOperator: LessThanThreshold
+      MetricName: CPUUtilization
+    DependsOn:
+      - appService
+      - ServiceScaleInPolicy
 
 # ------------------------------------------------------------#
 #  Outputs
@@ -38,3 +336,28 @@ Outputs:
     Value: !Ref logGroup
     Export:
       Name: !Sub ${SystemName}-loggroup
+  appALB:
+    Value: !Ref appALB
+    Export:
+      Name: !Sub ${SystemName}-app-alb
+  appALBUrl:
+    Value:
+      Fn::Join:
+        - ""
+        - - http://
+          - Fn::GetAtt: appALB.DNSName
+          - /
+    Export:
+      Name: !Sub ${SystemName}-app-alb-url
+  appAlbTg:
+    Value: !Ref appAlbTg
+    Export:
+      Name: !Sub ${SystemName}-app-alb-tg
+  appTask:
+    Value: !Ref appTask
+    Export:
+      Name: !Sub ${SystemName}-app-task
+  appService:
+    Value: !Ref appService
+    Export:
+      Name: !Sub ${SystemName}-app-service
