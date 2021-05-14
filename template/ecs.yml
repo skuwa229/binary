@@ -134,6 +134,9 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
         - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+        - arn:aws:iam::aws:policy/AWSAppMeshEnvoyAccess
 
   appTask:
     Type: AWS::ECS::TaskDefinition
@@ -172,23 +175,11 @@ Resources:
           Secrets:
             - Name: DBPASSWORD
               ValueFrom: !Sub ${SystemName}-db-password
-  deamonTask:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub ${SystemName}-app-task
-      RequiresCompatibilities:
-        - FARGATE
-      NetworkMode: awsvpc
-      TaskRoleArn: !Ref appTaskExecutionRole
-      ExecutionRoleArn: !Ref appTaskExecutionRole
-      Cpu: 32
-      Memory: 256
-      ContainerDefinitions:
-        - Name: app
-          Image: ""amazon/aws-xray-daemon"
+        - Name: x-ray
+          Image: "amazon/aws-xray-daemon"
           PortMappings:
             - Protocol: udp
-              HostPort: 0
+              HostPort: 2000
               ContainerPort: 2000
 
 
