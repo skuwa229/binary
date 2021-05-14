@@ -1,15 +1,18 @@
 package main
 
 import (
-	"fmt"
+	"github.com/aws/aws-xray-sdk-go/xray"
 	"net/http"
 )
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Hello, World!!!")
-}
-
 func main() {
-	http.HandleFunc("/", handler)
+	xray.Configure(xray.Config{
+		DaemonAddr:     "127.0.0.1:2000", // default
+		ServiceVersion: "1.2.3",
+	})
+
+	http.Handle("/", xray.Handler(xray.NewFixedSegmentNamer("myApp"), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Hello!"))
+	})))
 	http.ListenAndServe(":80", nil)
 }
