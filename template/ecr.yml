@@ -10,3 +10,7 @@ Resources:
     Properties:
       RepositoryName: go-server
 
+  TestEcrPoc:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: x-ray
