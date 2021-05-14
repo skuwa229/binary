@@ -172,6 +172,25 @@ Resources:
           Secrets:
             - Name: DBPASSWORD
               ValueFrom: !Sub ${SystemName}-db-password
+  deamonTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${SystemName}-app-task
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      TaskRoleArn: !Ref appTaskExecutionRole
+      ExecutionRoleArn: !Ref appTaskExecutionRole
+      Cpu: 32
+      Memory: 256
+      ContainerDefinitions:
+        - Name: app
+          Image: ""amazon/aws-xray-daemon"
+          PortMappings:
+            - Protocol: udp
+              HostPort: 0
+              ContainerPort: 2000
+
 
 # ------------------------------------------------------------#
 #  ECS Service
